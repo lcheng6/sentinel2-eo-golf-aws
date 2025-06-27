@@ -21,7 +21,7 @@ init_script_path
 
 w.clusters.create(
   cluster_name="Mosaic Demo Cluster",
-  node_type_id="Standard_D16ds_v5",
+  node_type_id="m6i.4xlarge",
   num_workers=4,
   autotermination_minutes=120,
   data_security_mode=C.DataSecurityMode.SINGLE_USER,
