@@ -10,9 +10,10 @@ import rasterio
 from matplotlib import pyplot
 from rasterio.plot import show
 
-from pyspark.sql.types import *
 from pyspark.sql import functions as F
 from pyspark.sql.functions import udf
+
+from pyspark.sql.types import ArrayType, StringType, MapType, DoubleType, IntegerType, StringType, StructType, StructField
 
 from pyspark.sql.functions import pandas_udf
 import pandas as pd
@@ -23,15 +24,15 @@ catalog =  pystac_client.Client.open(
 )
 
 
-@udf("array<string>")
+@udf(ArrayType(StringType()))
 def get_assets(item):
   item_dict = json.loads(item)
   assets = item_dict["assets"]
   return [json.dumps({**{"name": asset}, **assets[asset]}) for asset in assets]
 
 
-@pandas_udf("array<string>")
-def get_items(geojson: pd.Series, datetime: pd.Series, collections: pd.Series) -> pd.Series:
+@udf(ArrayType(StringType()))
+def get_items(geojson, datetime, collections):
 
   from tenacity import retry, wait_exponential
 
@@ -52,16 +53,14 @@ def get_items(geojson: pd.Series, datetime: pd.Series, collections: pd.Series) -
     except Exception as inst:
       return [str(inst)]
 
-  catalog =  pystac_client.Client.open(
+  catalog = pystac_client.Client.open(
     "https://planetarycomputer.microsoft.com/api/stac/v1",
     modifier=planetary_computer.sign_inplace
   )
 
-  dt = datetime[0]
-  coll = collections[0]
-  return geojson.apply(
-    lambda gj: search_catalog(gj, catalog, coll, dt)
-  )
+  dt = datetime
+  coll = collections
+  return search_catalog(geojson, catalog, coll, dt)
 
 
 def get_assets_for_cells(cells_df, period, source):
@@ -83,7 +82,7 @@ def get_assets_for_cells(cells_df, period, source):
     .repartition(200, F.rand())
 
 
-@udf("string")
+@udf(StringType())
 def download_asset(href, dir_path):
   import requests
   import os.path
@@ -102,7 +101,9 @@ def download_asset(href, dir_path):
     try:
       print(f"Downloading {filename} from {href} to {outpath}")
       # Make the actual request, set the timeout for no data to 10 seconds and enable streaming responses so we don't have to keep the large files in memory
-      response = requests.get(href, timeout=100, stream=True)
+      href = href.split("?")[0]
+      signed_url = planetary_computer.sign_url(href)
+      response = requests.get(signed_url, timeout=100, stream=True)
       if int(response.status_code) != 200 or int(response.headers['content-length']) < 1024:
         print(f"Downloading {filename} from {href} failed. Trying again.")
         raise TryAgain
