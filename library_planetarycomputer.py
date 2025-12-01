@@ -1,4 +1,5 @@
 import pystac_client
+import planetary_computer
 import json
 import requests
 import rasterio
@@ -9,32 +10,32 @@ import rasterio
 from matplotlib import pyplot
 from rasterio.plot import show
 
+from pyspark.sql.types import *
 from pyspark.sql import functions as F
 from pyspark.sql.functions import udf
-
-from pyspark.sql.types import ArrayType, StringType, MapType, DoubleType, IntegerType, StringType, StructType, StructField
 
 from pyspark.sql.functions import pandas_udf
 import pandas as pd
 
 catalog =  pystac_client.Client.open(
-  "https://earth-search.aws.element84.com/v1"
+  "https://planetarycomputer.microsoft.com/api/stac/v1",
+  modifier=planetary_computer.sign_inplace
 )
 
 
-@udf(ArrayType(StringType()))
+@udf("array<string>")
 def get_assets(item):
   item_dict = json.loads(item)
   assets = item_dict["assets"]
   return [json.dumps({**{"name": asset}, **assets[asset]}) for asset in assets]
 
 
-@udf(ArrayType(StringType()))
-def get_items(geojson, datetime, collections):
+@pandas_udf("array<string>")
+def get_items(geojson: pd.Series, datetime: pd.Series, collections: pd.Series) -> pd.Series:
 
-  from tenacity import retry, wait_exponential, TryAgain, stop_after_attempt, RetryError
+  from tenacity import retry, wait_exponential
 
-  # @retry(wait=wait_exponential(multiplier=2, min=1, max=12), stop=stop_after_attempt(3))
+  @retry(wait=wait_exponential(multiplier=2, min=4, max=120))
   def search_with_retry(geojson, catalog, collection, dt):
     search = catalog.search(
         collections = collection,
@@ -51,13 +52,16 @@ def get_items(geojson, datetime, collections):
     except Exception as inst:
       return [str(inst)]
 
-  catalog = pystac_client.Client.open(
-    "https://earth-search.aws.element84.com/v1",
+  catalog =  pystac_client.Client.open(
+    "https://planetarycomputer.microsoft.com/api/stac/v1",
+    modifier=planetary_computer.sign_inplace
   )
 
-  dt = datetime
-  coll = collections
-  return search_catalog(geojson, catalog, coll, dt)
+  dt = datetime[0]
+  coll = collections[0]
+  return geojson.apply(
+    lambda gj: search_catalog(gj, catalog, coll, dt)
+  )
 
 
 def get_assets_for_cells(cells_df, period, source):
@@ -79,7 +83,7 @@ def get_assets_for_cells(cells_df, period, source):
     .repartition(200, F.rand())
 
 
-@udf(StringType())
+@udf("string")
 def download_asset(href, dir_path):
   import requests
   import os.path
@@ -89,20 +93,16 @@ def download_asset(href, dir_path):
   outpath = f"{dir_path}/{filename}"
   if os.path.exists(outpath):
     return outpath
-  # if path doesn't exist create the parent folders
-  os.makedirs(os.path.dirname(outpath), exist_ok=True)
   
   @retry(
-    wait=wait_exponential(multiplier=2, min=1, max=16),
+    wait=wait_exponential(multiplier=2, min=4, max=120),
     stop=stop_after_attempt(5)
     )
   def retryable(href, dir_path, filename):
     try:
       print(f"Downloading {filename} from {href} to {outpath}")
       # Make the actual request, set the timeout for no data to 10 seconds and enable streaming responses so we don't have to keep the large files in memory
-      href = href.split("?")[0]
-      signed_url = planetary_computer.sign_url(href)
-      response = requests.get(signed_url, timeout=100, stream=True)
+      response = requests.get(href, timeout=100, stream=True)
       if int(response.status_code) != 200 or int(response.headers['content-length']) < 1024:
         print(f"Downloading {filename} from {href} failed. Trying again.")
         raise TryAgain
@@ -139,7 +139,7 @@ def plot_file(file_path):
 
 
 def rasterio_lambda(raster, lambda_f):
-  @udf(FloatType())
+  @udf("double")
   def f_udf(f_raster):
     with MemoryFile(BytesIO(f_raster)) as memfile:
       with memfile.open() as dataset:
